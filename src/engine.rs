@@ -166,18 +166,35 @@ pub fn determine_and_apply_settings(
         })?;
     }
 
-    // Determine AC/Battery status once, early in the function
-    // For desktops (no batteries), we should always use the AC power profile
-    // For laptops, we check if all batteries report connected to AC
-    let on_ac_power = if report.batteries.is_empty() {
-        // No batteries means desktop/server, always on AC
-        true
+    // Determine global AC connection status.
+    // If batteries are present, ac_connected is the same for all of them, reflecting overall AC status.
+    // If batteries list is empty, it implies a desktop. monitor.rs should have set overall_ac_connected to true
+    // which would be reflected if there was a dummy battery.
+    // For robustness here, if batteries are empty, we assume AC is connected.
+    // If batteries are present, we check their (common) ac_connected status.
+    let global_ac_connected = if report.batteries.is_empty() {
+        true // Default for systems without batteries (desktops)
     } else {
-        // Check if all batteries report AC connected
-        report.batteries.iter().all(|b| b.ac_connected)
+        // All batteries share the same ac_connected status from monitor.rs's overall_ac_connected logic
+        report.batteries.first().map_or(false, |b| b.ac_connected)
     };
 
+    debug!("Global AC connected status: {}", global_ac_connected);
+    if !report.batteries.is_empty() {
+        for battery in &report.batteries {
+            debug!("Battery '{}': status={:?}, ac_connected={}",
+                   battery.name,
+                   battery.charging_state.as_deref().unwrap_or("Unknown"),
+                   battery.ac_connected);
+        }
+    }
+
+    let on_ac_power = determine_power_status(report);
+
     let selected_profile_config: &ProfileConfig;
+
+    // Add a specific log for the final determination:
+    info!("System power status determined: {}", if on_ac_power { "AC Power" } else { "Battery Power" });
 
     if let Some(mode) = force_mode {
         match mode {
@@ -292,6 +309,222 @@ pub fn determine_and_apply_settings(
     debug!("Profile settings applied successfully.");
 
     Ok(())
+}
+
+/// Determines the power status (on AC or battery) based on the system report.
+/// This function encapsulates the logic for deciding if the system is effectively
+/// on AC power, considering battery states and AC connection.
+fn determine_power_status(report: &SystemReport) -> bool {
+    // Determine global AC connection status.
+    // If batteries are present, ac_connected is the same for all of them, reflecting overall AC status.
+    // If batteries list is empty, it implies a desktop. monitor.rs should have set overall_ac_connected to true
+    // which would be reflected if there was a dummy battery.
+    // For robustness here, if batteries are empty, we assume AC is connected.
+    // If batteries are present, we check their (common) ac_connected status.
+    let global_ac_connected = if report.batteries.is_empty() {
+        true // Default for systems without batteries (desktops)
+    } else {
+        // All batteries share the same ac_connected status from monitor.rs's overall_ac_connected logic
+        report.batteries.first().map_or(false, |b| b.ac_connected)
+    };
+
+    if report.batteries.is_empty() {
+        // No batteries implies desktop like system.
+        // Use the global_ac_connected which should be true if monitor.rs detected AC or desktop.
+        global_ac_connected
+    } else {
+        // Batteries are present.
+        if global_ac_connected {
+            // AC adapter is connected.
+            // Consider on AC power if at least one battery is not "Discharging".
+            // This covers "Charging", "Full", "Not charging", "Unknown", etc.
+            report.batteries.iter().any(|b| {
+                match b.charging_state.as_deref() {
+                    Some(state) => state.to_lowercase() != "discharging",
+                    None => true, // No charging state info? Assume not discharging if AC is connected.
+                }
+            })
+        } else {
+            // AC adapter is not connected, so definitely on battery power.
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{BatteryInfo, CpuCoreInfo, CpuGlobalInfo, SystemInfo, SystemLoad};
+    use std::time::SystemTime;
+
+    // Helper to create BatteryInfo
+    fn mock_battery_info(name: &str, ac_connected: bool, charging_state: Option<&str>) -> BatteryInfo {
+        BatteryInfo {
+            name: name.to_string(),
+            ac_connected,
+            charging_state: charging_state.map(String::from),
+            capacity_percent: Some(80),
+            power_rate_watts: None,
+            charge_start_threshold: None,
+            charge_stop_threshold: None,
+        }
+    }
+
+    // Helper to create SystemReport
+    fn mock_report(batteries: Vec<BatteryInfo>) -> SystemReport {
+        SystemReport {
+            system_info: SystemInfo {
+                cpu_model: "Test CPU".to_string(),
+                architecture: "x86_64".to_string(),
+                linux_distribution: "TestOS".to_string(),
+            },
+            cpu_cores: vec![CpuCoreInfo {
+                core_id: 0,
+                current_frequency_mhz: Some(2000),
+                min_frequency_mhz: Some(1000),
+                max_frequency_mhz: Some(3000),
+                usage_percent: Some(10.0),
+                temperature_celsius: Some(40.0),
+            }],
+            cpu_global: CpuGlobalInfo {
+                current_governor: Some("performance".to_string()),
+                available_governors: vec!["performance".to_string(), "powersave".to_string()],
+                turbo_status: Some(true),
+                epp: None,
+                epb: None,
+                platform_profile: None,
+                average_temperature_celsius: Some(40.0),
+            },
+            batteries,
+            system_load: SystemLoad {
+                load_avg_1min: 0.5,
+                load_avg_5min: 0.4,
+                load_avg_15min: 0.3,
+            },
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn test_desktop_mode() {
+        // No batteries, ac_connected on BatteryInfo is irrelevant here,
+        // global_ac_connected should be true by default for empty batteries.
+        let report = mock_report(vec![]);
+        assert!(determine_power_status(&report), "Desktop mode (no batteries) should be on AC Power");
+    }
+
+    #[test]
+    fn test_ac_charging() {
+        // AC connected, one battery "Charging"
+        let batteries = vec![mock_battery_info("BAT0", true, Some("Charging"))];
+        let report = mock_report(batteries);
+        assert!(determine_power_status(&report), "AC connected, charging battery should be on AC Power");
+    }
+
+    #[test]
+    fn test_ac_full() {
+        // AC connected, one battery "Full"
+        let batteries = vec![mock_battery_info("BAT0", true, Some("Full"))];
+        let report = mock_report(batteries);
+        assert!(determine_power_status(&report), "AC connected, full battery should be on AC Power");
+    }
+
+    #[test]
+    fn test_ac_battery_status_unknown() { // Renamed from test_ac_battery_status_none
+        // AC connected, one battery with unknown status (None)
+        let batteries = vec![mock_battery_info("BAT0", true, None)];
+        let report = mock_report(batteries);
+        assert!(determine_power_status(&report), "AC connected, battery status None should be considered AC Power");
+    }
+
+    #[test]
+    fn test_ac_discharging_edge_case() {
+        // AC connected, but the single battery is "Discharging"
+        // This implies AC cannot keep up, so it should be treated as on Battery Power.
+        let batteries = vec![mock_battery_info("BAT0", true, Some("Discharging"))];
+        let report = mock_report(batteries);
+        assert!(!determine_power_status(&report), "AC connected, but single battery discharging should be Battery Power");
+    }
+
+    #[test]
+    fn test_ac_mixed_batteries_one_good() { // Renamed for clarity
+        // AC connected, one "Charging", one "Discharging"
+        // Should be AC power because at least one is not Discharging.
+        let batteries = vec![
+            mock_battery_info("BAT0", true, Some("Charging")),
+            mock_battery_info("BAT1", true, Some("Discharging")),
+        ];
+        let report = mock_report(batteries);
+        assert!(determine_power_status(&report), "AC connected, mixed batteries (one charging) should be AC Power");
+    }
+
+    #[test]
+    fn test_ac_mixed_batteries_one_full() { // Renamed for clarity
+        // AC connected, one "Full", one "Discharging"
+        // Should be AC power because at least one is not Discharging.
+        let batteries = vec![
+            mock_battery_info("BAT0", true, Some("Full")),
+            mock_battery_info("BAT1", true, Some("Discharging")),
+        ];
+        let report = mock_report(batteries);
+        assert!(determine_power_status(&report), "AC connected, mixed batteries (one full) should be AC Power");
+    }
+
+    #[test]
+    fn test_ac_mixed_batteries_one_unknown() { // Renamed for clarity
+        // AC connected, one "None", one "Discharging"
+        // Should be AC power because at least one is not Discharging (None counts as not Discharging).
+        let batteries = vec![
+            mock_battery_info("BAT0", true, None),
+            mock_battery_info("BAT1", true, Some("Discharging")),
+        ];
+        let report = mock_report(batteries);
+        assert!(determine_power_status(&report), "AC connected, mixed batteries (one unknown) should be AC Power");
+    }
+
+    #[test]
+    fn test_ac_all_discharging() {
+        // AC connected, but all (multiple) batteries are "Discharging"
+        // Implies AC cannot keep up, so Battery Power.
+        let batteries = vec![
+            mock_battery_info("BAT0", true, Some("Discharging")),
+            mock_battery_info("BAT1", true, Some("Discharging")),
+        ];
+        let report = mock_report(batteries);
+        assert!(!determine_power_status(&report), "AC connected, all batteries discharging should be Battery Power");
+    }
+
+    #[test]
+    fn test_battery_discharging() {
+        // AC not connected, one battery "Discharging"
+        let batteries = vec![mock_battery_info("BAT0", false, Some("Discharging"))];
+        let report = mock_report(batteries);
+        assert!(!determine_power_status(&report), "AC not connected, discharging battery should be Battery Power");
+    }
+
+    #[test]
+    fn test_battery_charging_but_no_ac() { // Test name implies an impossible state, but tests the logic
+        // AC not connected, but battery state is "Charging" (inconsistent, but tests global_ac_connected dominance)
+        let batteries = vec![mock_battery_info("BAT0", false, Some("Charging"))];
+        let report = mock_report(batteries);
+        assert!(!determine_power_status(&report), "AC not connected, even if battery says charging, should be Battery Power");
+    }
+
+    #[test]
+    fn test_battery_full_but_no_ac() {
+        // AC not connected, battery "Full"
+        let batteries = vec![mock_battery_info("BAT0", false, Some("Full"))];
+        let report = mock_report(batteries);
+        assert!(!determine_power_status(&report), "AC not connected, full battery should be Battery Power");
+    }
+
+    #[test]
+    fn test_battery_status_unknown_no_ac() { // Renamed from test_no_ac_battery_status_none
+        // AC not connected, battery status None
+        let batteries = vec![mock_battery_info("BAT0", false, None)];
+        let report = mock_report(batteries);
+        assert!(!determine_power_status(&report), "AC not connected, battery status None should be Battery Power");
+    }
 }
 
 fn manage_auto_turbo(
