@@ -9,6 +9,7 @@ mod monitor;
 mod util;
 
 use crate::config::AppConfig;
+use crate::engine::determine_power_status;
 use crate::core::{GovernorOverrideMode, TurboSetting};
 use crate::util::error::{AppError, ControlError};
 use clap::{Parser, value_parser};
@@ -110,6 +111,7 @@ fn main() -> Result<(), AppError> {
         // TODO: This will be moved to a different module in the future.
         Some(Commands::Info) => match monitor::collect_system_report(&config) {
             Ok(report) => {
+                let effective_on_ac = determine_power_status(&report);
                 // Format section headers with proper centering
                 let format_section = |title: &str| {
                     let title_len = title.len();
@@ -131,6 +133,7 @@ fn main() -> Result<(), AppError> {
                     "Linux Distribution: {}",
                     report.system_info.linux_distribution
                 );
+                println!("Power Source:       {}", if effective_on_ac { "AC Adapter" } else { "Battery" });
 
                 // Format timestamp in a readable way
                 println!("Current Time:       {}", jiff::Timestamp::now());
@@ -275,14 +278,14 @@ fn main() -> Result<(), AppError> {
                             if battery_info.capacity_percent.is_some()
                                 || battery_info.power_rate_watts.is_some()
                             {
-                                let power_status = if battery_info.ac_connected {
-                                    "Connected to AC"
-                                } else {
-                                    "Running on Battery"
-                                };
+                                // let power_status = if battery_info.ac_connected {
+                                //     "Connected to AC"
+                                // } else {
+                                //     "Running on Battery"
+                                // };
 
                                 println!("Battery {}:", battery_info.name);
-                                println!("  Power Status:     {power_status}");
+                                // println!("  Power Status:     {power_status}");
                                 println!(
                                     "  State:            {}",
                                     battery_info.charging_state.as_deref().unwrap_or("Unknown")

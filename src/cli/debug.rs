@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::cpu;
+use crate::engine::determine_power_status;
 use crate::monitor;
 use crate::util::error::AppError;
 use std::fs;
@@ -35,6 +36,8 @@ pub fn run_debug(config: &AppConfig) -> Result<(), AppError> {
     // Get system information
     match monitor::collect_system_report(config) {
         Ok(report) => {
+            let effective_on_ac = determine_power_status(&report);
+
             println!("\n--- SYSTEM INFORMATION ---");
             println!("CPU Model: {}", report.system_info.cpu_model);
             println!("Architecture: {}", report.system_info.architecture);
@@ -134,6 +137,12 @@ pub fn run_debug(config: &AppConfig) -> Result<(), AppError> {
                     || "N/A (CPU temperature sensor not detected)".to_string(),
                     |t| format!("{t:.1}°C")
                 )
+            );
+
+            println!("\n--- SYSTEM POWER STATUS ---");
+            println!(
+                "Effective System Power Status: {}",
+                if effective_on_ac { "AC Power" } else { "Battery Power" }
             );
 
             println!("\n--- BATTERY INFORMATION ---");

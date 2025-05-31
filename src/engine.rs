@@ -314,7 +314,7 @@ pub fn determine_and_apply_settings(
 /// Determines the power status (on AC or battery) based on the system report.
 /// This function encapsulates the logic for deciding if the system is effectively
 /// on AC power, considering battery states and AC connection.
-fn determine_power_status(report: &SystemReport) -> bool {
+pub fn determine_power_status(report: &SystemReport) -> bool {
     // Determine global AC connection status.
     // If batteries are present, ac_connected is the same for all of them, reflecting overall AC status.
     // If batteries list is empty, it implies a desktop. monitor.rs should have set overall_ac_connected to true
